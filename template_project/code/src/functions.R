@@ -85,7 +85,7 @@ share_lost <- function(df_old, df_new, id, threshold = NULL) {
   n_ssn_new <- length(unique(df_new[[id]]))
   share <- 1 - n_ssn_new / n_ssn
   cat(sprintf("\n Share of SSN lost = %.3f", share))
-
+  
   if (!is.null(threshold)) {
     stopifnot(share < threshold)
   }
@@ -100,35 +100,20 @@ first_nonmiss <- function(x) {
 
 
 mdesc <- function(df, vars = "") {
-  #--------------------------------------------------------
-  # Missing data summary for all or selected variables
-  #--------------------------------------------------------
   
-  # If vars not specified, default to all columns in df
   if (length(vars) == 1 && vars == "") {
     vars <- names(df)
   }
   
-  #--------------------------------------------------------
-  # Compute missing values for each variable
-  #--------------------------------------------------------
   df %>%
-    summarise(across(all_of(vars),
+    summarise(across(all_of({{vars}}),
                      ~sum(if (is.character(.)) is.na(.) | . == "" else is.na(.))
-    )) %>%
-    
-    # Add total number of rows
-    mutate(total = n()) %>%
-    
-    # Reshape from wide to long format
+    ),
+    total = n()) %>%
     pivot_longer(cols = all_of(vars),
                  names_to = "variables",
                  values_to = "missing") %>%
-    
-    # Compute share of missing values (rounded to 2 decimals)
     mutate(share = round(missing / total, digits = 2)) %>%
-    
-    # Reorder columns for readability
     relocate(variables, missing, total, share)
 }
 
