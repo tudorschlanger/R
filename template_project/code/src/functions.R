@@ -22,28 +22,116 @@ xtile <- function(.data, nquantiles = 10) {
 #       cumuPer = round(cumsum(freq = n /sum(n)), 2)
 #     )
 # }
-tab <- function(.data, var) {
-  .data %>%
-    filter(!is.na({{var}})) %>% 
-    group_by({{var}}) %>% 
-    summarise(n = n()) %>% 
-    mutate(
-      totalN = cumsum(n),
-      percent = round((n/sum(n)), 2), 
-      cumuPer = round(cumsum(freq=n /sum(n)), 2)
-    )
-}
-    
-# mdesc
-mdesc <- function(.data, vars, group_var) {
-  .data %>% 
-    group_by({{group_var}}) %>% 
-    summarise(across({{vars}}, ~ sum(is.na(.))), total = n()) %>%
-    pivot_longer(cols = {{vars}}, names_to = "variables", values_to = "missing") %>% 
-    mutate(pct = round(missing / total, digits = 2)) %>% 
-    relocate({{group_var}}, variables, missing, total, pct)
+tab <- function(df, vars = "") {
+  #--------------------------------------------------------
+  # Frequency table generator (1-way or 2-way)
+  #--------------------------------------------------------
+  # Works like Stata's 'tab' command:
+  #   - tab(var1)  ->  one-way frequency + share
+  #   - tab(var1, var2) ->  cross-tab with shares
   
+  # If vars not specified, use all variables in df
+  if (length(vars) == 1 && vars == "") {
+    vars <- names(df)
+  }
+  
+  # Prevent conflict with variable name "n" (used internally by dplyr::count)
+  if ("n" %in% vars) stop("Choose other variable names than n.")
+  
+  #--------------------------------------------------------
+  # 1-WAY TABULATION
+  #--------------------------------------------------------
+  if (length(vars) == 1) {
+    var <- sym(vars[1])
+    cat("\nDistribution of ", vars[1], " values:\n")
+    
+    df %>%
+      count(!!var) %>%                                 # count occurrences
+      mutate(share = round(n / sum(n), 2))             # compute share (%)
+    
+    #--------------------------------------------------------
+    # 2-WAY TABULATION
+    #--------------------------------------------------------
+  } else if (length(vars) == 2) {
+    var1 <- sym(vars[1])
+    var2 <- sym(vars[2])
+    cat("\nShare of ", vars[2], " by ", vars[1], ":\n")
+    
+    df %>%
+      drop_na(!!var1, !!var2) %>%                      # drop missing values
+      count(!!var1, !!var2) %>%                        # count joint frequencies
+      group_by(!!var1) %>%
+      mutate(share = n / sum(n)) %>%                   # within-group shares
+      pivot_wider(                                     # reshape to wide
+        id_cols = !!var1,
+        values_from = share,
+        names_from = !!var2,
+        names_prefix = paste0(vars[2], " = ")
+      ) %>%
+      ungroup()
+    
+    #--------------------------------------------------------
+    # INVALID INPUT
+    #--------------------------------------------------------
+  } else {
+    stop("Length of vars argument <= 2")
+  }
 }
+
+
+
+share_lost <- function(df_old, df_new, id, threshold = NULL) {
+  n_ssn <- length(unique(df_old[[id]]))
+  n_ssn_new <- length(unique(df_new[[id]]))
+  share <- 1 - n_ssn_new / n_ssn
+  cat(sprintf("\n Share of SSN lost = %.3f", share))
+
+  if (!is.null(threshold)) {
+    stopifnot(share < threshold)
+  }
+}
+
+
+first_nonmiss <- function(x) {
+  i <- which(!is.na(x))[1L]
+  if (is.na(i)) vctrs::vec_cast(NA, x) else x[i]
+}
+
+
+
+mdesc <- function(df, vars = "") {
+  #--------------------------------------------------------
+  # Missing data summary for all or selected variables
+  #--------------------------------------------------------
+  
+  # If vars not specified, default to all columns in df
+  if (length(vars) == 1 && vars == "") {
+    vars <- names(df)
+  }
+  
+  #--------------------------------------------------------
+  # Compute missing values for each variable
+  #--------------------------------------------------------
+  df %>%
+    summarise(across(all_of(vars),
+                     ~sum(if (is.character(.)) is.na(.) | . == "" else is.na(.))
+    )) %>%
+    
+    # Add total number of rows
+    mutate(total = n()) %>%
+    
+    # Reshape from wide to long format
+    pivot_longer(cols = all_of(vars),
+                 names_to = "variables",
+                 values_to = "missing") %>%
+    
+    # Compute share of missing values (rounded to 2 decimals)
+    mutate(share = round(missing / total, digits = 2)) %>%
+    
+    # Reorder columns for readability
+    relocate(variables, missing, total, share)
+}
+
 
 # tlag 
 tlag <- function(x, n = 1L, time, default = NA) {
@@ -60,32 +148,43 @@ tlag <- function(x, n = 1L, time, default = NA) {
 
 
 # ISID 
-isid <- function (data, vars, verbose = FALSE, ignore_error = FALSE) {
-  unique <- nrow(data[!duplicated(data[, vars]), ])
-  total <- nrow(data)
+isid <- function(df, vars, verbose = TRUE, ignore_error = FALSE) {
+  #--------------------------------------------------------
+  # Check whether the given variables uniquely identify rows
+  # Similar to Stata's `isid` command
+  #--------------------------------------------------------
   
-  if (verbose == FALSE) {
-    cat("Are variables a unique ID?\n")
+  setDT(df)  # ensure df is a data.table
+  
+  # Count number of unique rows for the provided ID variables
+  unique <- nrow(df[!duplicated(df[, ..vars]), ])
+  total  <- nrow(df)
+  
+  vars_concat <- paste(vars, collapse = ", ")
+  
+  #--------------------------------------------------------
+  # Verbose output (if enabled)
+  #--------------------------------------------------------
+  if (verbose == TRUE) {
+    cat(paste0("Do variables ", vars_concat, " uniquely identify the data?\n"))
     print(unique == total)
     cat("Variables define this many unique rows:\n")
     print(unique)
     cat("There are this many total rows in the data:\n")
     print(total)
   }
-  vars_pasted = paste0(vars, collapse = " ")
-  message <- paste0("Variable(s) ", vars_pasted, " do not uniquely identify the data.")
+  
+  #--------------------------------------------------------
+  # If they do not uniquely identify, show or stop with message
+  #--------------------------------------------------------
+  vars_pasted <- paste0(vars, collapse = " ")
+  message <- paste0("Variable(s) ", vars_pasted, " do not uniquely identify the df.")
+  
   if (unique != total) {
-    if (ignore_error) {
-      print(message)
-    }
-    else {
+    if (ignore_error == FALSE) {
       stop(message)
     }
   }
-  
-  # # Ensure that the identifying variables have no missing data
-  # try(na.fail(data[, vars])) 
-
 }
 
 # Save plots 
@@ -142,6 +241,117 @@ winsorize <- function(x, cutpoints, verbose = TRUE) {
   x
   
 }
+
+share_lost <- function(df_old, df_new, id, threshold = NULL) {
+  n_ssn <- length(unique(df_old[[id]]))
+  n_ssn_new <- length(unique(df_new[[id]]))
+  share <- 1 - n_ssn_new / n_ssn
+  cat(sprintf("\n Share of SSN lost = %.3f", share))
+  
+  if (!is.null(threshold)) {
+    stopifnot(share < threshold)
+  }
+}
+
+first_nonmiss <- function(x) {
+  i <- which(!is.na(x))[1L]
+  if (is.na(i)) vctrs::vec_cast(NA, x) else x[i]
+}
+
+classes <- function(df) {
+  data.frame(
+    variable = names(df),
+    class = sapply(df, function(x) paste(class(x), collapse = ", "))
+  )
+}
+
+
+make_wide <- function(df, id_vars, wide_vars, value_vars = NULL) {
+  
+  # Check that the combination of id_vars and wide_vars uniquely identifies rows
+  isid(df, c(id_vars, wide_vars), verbose = FALSE)
+  
+  # Convert to data.table if not already
+  setDT(df)
+  
+  # Build formula components for dcast
+  formula_lhs <- paste(id_vars, collapse = " + ")     # left-hand side (identifiers)
+  formula_rhs <- paste(wide_vars, collapse = " + ")   # right-hand side (variables to spread)
+  
+  # Create the reshaping formula (e.g., id1 + id2 ~ year + variable)
+  dcast_formula <- as.formula(paste0(formula_lhs, " ~ ", formula_rhs))
+  
+  # Determine which columns should be used as value variables
+  if (is.null(value_vars)) {
+    # If not provided, use all columns except id_vars and wide_vars
+    value.var <- setdiff(names(df), c(id_vars, wide_vars))
+  } else {
+    value.var <- value_vars
+  }
+  
+  cat("\n Reshaping wide...\n")
+  
+  # Perform the wide transformation
+  df_wide <- dcast(
+    df,
+    dcast_formula,
+    value.var = value.var
+  )
+  
+  # Return the reshaped data.table
+  return(df_wide)
+}
+
+sumup <- function(df, vars = "") {
+  #--------------------------------------------------
+  # Summary statistics generator for numeric columns
+  #--------------------------------------------------
+  # If vars not specified, automatically detect numeric columns
+  setDT(df)
+  if (length(vars) == 1 && vars == "") {
+    vars <- names(df)
+  }
+  
+  # Keep only numeric variables from the provided vars
+  vars_num <- vars[sapply(df[, ..vars], is.numeric)]
+  
+  #--------------------------------------------
+  # Compute summary statistics for each variable
+  #--------------------------------------------
+  summary_stats <- df %>%
+    summarise(across(all_of(vars_num),
+                     list(
+                       N    = ~sum(!is.na(.x)),                      # Number of non-missing obs
+                       Mean = ~mean(.x, na.rm = TRUE),               # Mean
+                       SD   = ~sd(.x, na.rm = TRUE),                 # Standard deviation
+                       Min  = ~min(.x, na.rm = TRUE),                # Minimum
+                       p10  = ~quantile(.x, probs = 0.1, na.rm = TRUE),  # 10th percentile
+                       p50  = ~quantile(.x, probs = 0.5, na.rm = TRUE),  # Median
+                       p90  = ~quantile(.x, probs = 0.9, na.rm = TRUE),  # 90th percentile
+                       Max  = ~max(.x, na.rm = TRUE)                 # Maximum
+                     ),
+                     .names = "{.col}--{.fn}"                        # Custom name pattern
+    )) %>%
+    
+    #--------------------------------------------
+  # Reshape from wide → long → tidy wide format
+  #--------------------------------------------
+  pivot_longer(everything(),
+               names_to = c("variable", "statistic"),
+               names_sep = "--") %>%
+    
+    pivot_wider(names_from = statistic,
+                values_from = value) %>%
+    
+    # Round numeric results to 3 decimals
+    mutate(across(where(is.numeric), ~round(.x, 3)))
+  
+  # Clean up column names
+  colnames(summary_stats) <- c("variable", colnames(summary_stats)[2:ncol(summary_stats)])
+  
+  return(summary_stats)
+}
+
 
 
 # 
